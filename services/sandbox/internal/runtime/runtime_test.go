@@ -49,7 +49,7 @@ func TestLangSpec(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error: %v", err)
 	}
-	if spec.FileName != "main.cpp" || image != "gcc:13" || fileName != "main.cpp" {
+	if spec.FileName != "main.cpp" || image != "frolvlad/alpine-gxx:latest" || fileName != "main.cpp" {
 		t.Fatalf("unexpected cpp spec: %+v image=%s file=%s", spec, image, fileName)
 	}
 	if len(cmds) != 2 {
@@ -809,6 +809,55 @@ func TestExecuteSuccessAndErrorEvent(t *testing.T) {
 	}
 }
 
+func TestExecuteImageEnsureNotBoundToWalltime(t *testing.T) {
+	var inspectCtx context.Context
+	client := &fakeDockerClient{
+		t:          t,
+		createResp: container.ContainerCreateCreatedBody{ID: "cid"},
+		execQueue: []*fakeExecCall{
+			{
+				expectCmd: []string{"/bin/sh", "-c", "mkdir -p '/workspace'"},
+				inspect:   types.ContainerExecInspect{ExitCode: 0},
+			},
+			{
+				expectCmd: []string{"/bin/sh", "-c", "cat > '/workspace/main.py'"},
+				inspect:   types.ContainerExecInspect{ExitCode: 0},
+			},
+			{
+				expectCmd: []string{"/bin/sh", "-c", "chmod 600 '/workspace/main.py'"},
+				inspect:   types.ContainerExecInspect{ExitCode: 0},
+			},
+			{
+				expectCmd: []string{"python3", "main.py"},
+				inspect:   types.ContainerExecInspect{ExitCode: 0},
+			},
+		},
+		inspectCtxHook: func(ctx context.Context) {
+			inspectCtx = ctx
+		},
+	}
+
+	orig := newDockerClient
+	newDockerClient = func() (dockerClient, error) {
+		return client, nil
+	}
+	defer func() { newDockerClient = orig }()
+
+	res, err := Execute(context.Background(), LangPython, "print('hi')", Limits{WallTime: 5 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("execute error: %v", err)
+	}
+	if res.Exit.Code != 0 {
+		t.Fatalf("expected exit code 0, got %d", res.Exit.Code)
+	}
+	if inspectCtx == nil {
+		t.Fatalf("expected ImageInspect context capture")
+	}
+	if dl, ok := inspectCtx.Deadline(); ok {
+		t.Fatalf("expected inspect context without deadline, got %v", dl)
+	}
+}
+
 func TestDefaultDockerClientFactory(t *testing.T) {
 	orig := newDockerClient
 	defer func() { newDockerClient = orig }()
@@ -859,6 +908,7 @@ type fakeDockerClient struct {
 	imageInspectErr error
 	imagePullErr    error
 	imagePulled     bool
+	inspectCtxHook  func(context.Context)
 
 	createResp container.ContainerCreateCreatedBody
 	createErr  error
@@ -890,7 +940,10 @@ type fakeExecCall struct {
 	writeErr error
 }
 
-func (f *fakeDockerClient) ImageInspectWithRaw(context.Context, string) (types.ImageInspect, []byte, error) {
+func (f *fakeDockerClient) ImageInspectWithRaw(ctx context.Context, image string) (types.ImageInspect, []byte, error) {
+	if f.inspectCtxHook != nil {
+		f.inspectCtxHook(ctx)
+	}
 	return types.ImageInspect{}, nil, f.imageInspectErr
 }
 

@@ -113,14 +113,11 @@ func Execute(ctx context.Context, lang Language, code string, limits Limits) (Re
 		return res, nil
 	}
 
-	runCtx, cancel := context.WithTimeout(ctx, sbx.limits.WallTime)
-	defer cancel()
-
 	var stdoutBuf, stderrBuf strings.Builder
 	result := Result{Events: make([]Event, 0, len(cmds)*2+1)}
 
 	exit, timedOut, runErr := sbx.Run(
-		runCtx,
+		ctx,
 		fileName,
 		[]byte(code),
 		cmds,
@@ -153,9 +150,20 @@ func Execute(ctx context.Context, lang Language, code string, limits Limits) (Re
 func (s *Sandbox) Run(ctx context.Context, fileName string, code []byte, cmds [][]string,
 	onStdout func([]byte), onStderr func([]byte)) (exit int, timedOut bool, err error) {
 
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	if err := s.ensureImage(ctx); err != nil {
 		return -1, false, translateDockerErr(err)
 	}
+
+	runCtx := ctx
+	cancel := func() {}
+	if s.limits.WallTime > 0 {
+		runCtx, cancel = context.WithTimeout(ctx, s.limits.WallTime)
+	}
+	defer cancel()
 
 	hostCfg := &container.HostConfig{
 		NetworkMode:    "none",
@@ -177,7 +185,7 @@ func (s *Sandbox) Run(ctx context.Context, fileName string, code []byte, cmds []
 		Env:          []string{"PYTHONDONTWRITEBYTECODE=1"},
 	}
 
-	create, err := s.cli.ContainerCreate(ctx, conf, hostCfg, nil, nil, "")
+	create, err := s.cli.ContainerCreate(runCtx, conf, hostCfg, nil, nil, "")
 	if err != nil {
 		return -1, false, translateDockerErr(err)
 	}
@@ -186,17 +194,17 @@ func (s *Sandbox) Run(ctx context.Context, fileName string, code []byte, cmds []
 		_ = s.cli.ContainerRemove(context.Background(), cid, types.ContainerRemoveOptions{Force: true})
 	}()
 
-	if err := s.cli.ContainerStart(ctx, cid, types.ContainerStartOptions{}); err != nil {
+	if err := s.cli.ContainerStart(runCtx, cid, types.ContainerStartOptions{}); err != nil {
 		return -1, false, translateDockerErr(err)
 	}
 
-	if err := s.copyFile(ctx, cid, "/workspace/"+fileName, code, 0600); err != nil {
+	if err := s.copyFile(runCtx, cid, "/workspace/"+fileName, code, 0600); err != nil {
 		_ = s.cli.ContainerKill(context.Background(), cid, "SIGKILL")
 		return -1, false, translateDockerErr(err)
 	}
 
 	for i, cmd := range cmds {
-		execID, attachCloser, err := s.execStart(ctx, cid, cmd)
+		execID, attachCloser, err := s.execStart(runCtx, cid, cmd)
 		if err != nil {
 			_ = s.cli.ContainerKill(context.Background(), cid, "SIGKILL")
 			return -1, false, translateDockerErr(err)
@@ -209,7 +217,7 @@ func (s *Sandbox) Run(ctx context.Context, fileName string, code []byte, cmds []
 		)
 		attachCloser.Close()
 
-		ir, ierr := s.cli.ContainerExecInspect(ctx, execID)
+		ir, ierr := s.cli.ContainerExecInspect(runCtx, execID)
 		if ierr != nil {
 			_ = s.cli.ContainerKill(context.Background(), cid, "SIGKILL")
 			return -1, false, translateDockerErr(ierr)
@@ -390,7 +398,7 @@ func langSpec(lang Language) (LanguageSpec, string, string, [][]string, error) {
 				CompileCmd: []string{"g++", "-O2", "-std=c++17", "main.cpp", "-o", "main"},
 				ExecCmd:    []string{"./main"},
 			},
-			"gcc:13",
+			"frolvlad/alpine-gxx:latest",
 			"main.cpp",
 			[][]string{{"g++", "-O2", "-std=c++17", "main.cpp", "-o", "main"}, {"./main"}},
 			nil
