@@ -240,7 +240,7 @@ func (r *Runner) langSpec(lang models.Language) (models.LanguageSpec, string, st
 				Formatter:       []string{"clang-format"},
 				ExampleTemplate: "#include <iostream>\n\nint main() {\n    std::cout << \"Hello from C++!\" << std::endl;\n    return 0;\n}\n",
 			},
-			"gcc:13",
+			"frolvlad/alpine-gxx:latest",
 			"main.cpp",
 			[][]string{{"g++", "-O2", "-std=c++17", "main.cpp", "-o", "main"}, {"./main"}},
 			nil
